@@ -37,7 +37,6 @@ spec:
         container('kubectl') {
           sh '''
             set -euo pipefail
-            kubectl get ns "${NAMESPACE}" >/dev/null 2>&1 || kubectl create ns "${NAMESPACE}"
             kubectl apply -n "${NAMESPACE}" -f release/kubernetes-manifests.yaml
             kubectl rollout status -n "${NAMESPACE}" deploy/frontend --timeout=600s
           '''
