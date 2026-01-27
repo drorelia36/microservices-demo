@@ -5,21 +5,57 @@ pipeline {
 apiVersion: v1
 kind: Pod
 spec:
+  serviceAccountName: jenkins
   containers:
   - name: tools
     image: alpine:3.20
-    command: ["sh","-c","cat"]
+    command: ["sh", "-c", "cat"]
     tty: true
+    volumeMounts:
+    - mountPath: "/home/jenkins/agent"
+      name: "workspace-volume"
+      readOnly: false
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:v1.23.2
+    command: ["sh", "-c", "cat"]
+    tty: true
+    volumeMounts:
+    - name: "workspace-volume"
+      mountPath: "/home/jenkins/agent"
+      readOnly: false
+    - name: gcp-sa
+      mountPath: /secret
+      readOnly: true
+  volumes:
+  - name: "workspace-volume"
+    emptyDir: {}
+  - name: gcp-sa
+    secret:
+      secretName: gcp-sa-json
 """
     }
   }
 
   options {
+    // אם התקנת Timestamper זה עובד, אם לא – אפשר להסיר
     timestamps()
     disableConcurrentBuilds()
   }
 
+  environment {
+    // תעדכן כאן לערכים שלך:
+    PROJECT_ID = "dror-project-482618"
+    REGION     = "europe-west1"
+    AR_REPO    = "microservices"
+  }
+
   stages {
+    stage("Checkout") {
+      steps {
+        checkout scm
+      }
+    }
+
     stage("Info") {
       steps {
         container('tools') {
@@ -33,13 +69,50 @@ spec:
       }
     }
 
-    stage("Lint/Test (placeholder)") {
+    stage("Lint/Test") {
       steps {
         container('tools') {
           sh '''
             set -euo pipefail
-            echo "Here you will run lint/tests"
-            echo "✅ CI stage OK"
+            echo "=== Installing make ==="
+            apk add --no-cache make
+
+            echo "=== Running lint ==="
+            make lint
+
+            echo "=== Running test ==="
+            make test
+
+            echo "✅ CI (lint+test) OK"
+          '''
+        }
+      }
+    }
+
+    stage("Build & Push frontend image (main only)") {
+      when {
+        branch "main"
+      }
+      steps {
+        container('kaniko') {
+          sh '''
+            set -euo pipefail
+
+            echo "=== Kaniko: setting credentials ==="
+            export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
+
+            TAG="${GIT_COMMIT:0:7}"
+            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+
+            echo "Building and pushing ${IMAGE}"
+
+            /kaniko/executor \
+              --context "${WORKSPACE}" \
+              --dockerfile "${WORKSPACE}/src/frontend/Dockerfile" \
+              --destination "${IMAGE}" \
+              --cache=true
+
+            echo "✅ Image pushed: ${IMAGE}"
           '''
         }
       }
