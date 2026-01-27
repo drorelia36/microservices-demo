@@ -1,0 +1,49 @@
+pipeline {
+  agent {
+    kubernetes {
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: tools
+    image: alpine:3.20
+    command: ["sh","-c","cat"]
+    tty: true
+"""
+    }
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
+
+  stages {
+    stage("Info") {
+      steps {
+        container('tools') {
+          sh '''
+            set -euo pipefail
+            echo "BRANCH_NAME=${BRANCH_NAME}"
+            echo "CHANGE_ID=${CHANGE_ID:-}"
+            echo "GIT_COMMIT=${GIT_COMMIT}"
+          '''
+        }
+      }
+    }
+
+    stage("Lint/Test (placeholder)") {
+      steps {
+        container('tools') {
+          sh '''
+            set -euo pipefail
+            echo "Here you will run lint/tests"
+            echo "✅ CI stage OK"
+          '''
+        }
+      }
+    }
+  }
+}
+
