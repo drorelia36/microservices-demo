@@ -6,29 +6,37 @@ apiVersion: v1
 kind: Pod
 spec:
   serviceAccountName: jenkins
+
   containers:
   - name: tools
     image: alpine:3.20
     command: ["sh", "-c", "cat"]
     tty: true
     volumeMounts:
-    - mountPath: "/home/jenkins/agent"
-      name: "workspace-volume"
-      readOnly: false
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+
   - name: kaniko
-    # Use the debug variant which includes a shell so the container can stay alive
     image: gcr.io/kaniko-project/executor:debug
     command: ["sh", "-c", "cat"]
     tty: true
     volumeMounts:
-    - name: "workspace-volume"
-      mountPath: "/home/jenkins/agent"
-      readOnly: false
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
     - name: gcp-sa
       mountPath: /secret
       readOnly: true
+
+  - name: kubectl
+    image: dtzar/helm-kubectl:3.14.4
+    command: ["sh", "-c", "cat"]
+    tty: true
+    volumeMounts:
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+
   volumes:
-  - name: "workspace-volume"
+  - name: workspace-volume
     emptyDir: {}
   - name: gcp-sa
     secret:
@@ -46,29 +54,18 @@ spec:
     PROJECT_ID = "dror-project-482618"
     REGION     = "europe-west1"
     AR_REPO    = "microservices"
+    NAMESPACE  = "onlineboutique"
   }
 
   stages {
+
     stage("Checkout") {
       steps {
         checkout scm
       }
     }
 
-    stage("Info") {
-      steps {
-        container('tools') {
-          sh '''
-            set -euo pipefail
-            echo "BRANCH_NAME=${BRANCH_NAME}"
-            echo "CHANGE_ID=${CHANGE_ID:-}"
-            echo "GIT_COMMIT=${GIT_COMMIT}"
-          '''
-        }
-      }
-    }
-
-    stage("Lint/Test") {
+    stage("CI: Lint/Test") {
       steps {
         container('tools') {
           sh '''
@@ -76,35 +73,55 @@ spec:
             apk add --no-cache make git
             make lint || true
             make test || true
-            echo "✅ CI (lint+test) OK (placeholders)"
+            echo "✅ CI OK"
           '''
         }
       }
     }
 
-    stage("Build & Push frontend image (main only)") {
+    stage("Build & Push frontend image") {
       when { branch "main" }
       steps {
         container('kaniko') {
           sh '''
             set -euo pipefail
 
-            echo "=== Kaniko: setting credentials ==="
             export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
 
             TAG="${GIT_COMMIT:0:7}"
             IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
 
-            echo "Building and pushing ${IMAGE}"
+            echo "🚀 Building image ${IMAGE}"
 
             /kaniko/executor \
               --context "${WORKSPACE}/src/frontend" \
               --dockerfile "${WORKSPACE}/src/frontend/Dockerfile" \
               --destination "${IMAGE}" \
               --cache=true \
-              --verbosity=debug
+              --verbosity=info
 
-            echo "✅ Image pushed: ${IMAGE}"
+            echo "✅ Image pushed ${IMAGE}"
+          '''
+        }
+      }
+    }
+
+    stage("Deploy frontend") {
+      when { branch "main" }
+      steps {
+        container('kubectl') {
+          sh '''
+            set -euo pipefail
+
+            TAG="${GIT_COMMIT:0:7}"
+            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+
+            echo "🚀 Deploying ${IMAGE}"
+
+            kubectl -n ${NAMESPACE} set image deploy/frontend server=${IMAGE}
+            kubectl -n ${NAMESPACE} rollout status deploy/frontend --timeout=600s
+
+            echo "✅ Deployment complete"
           '''
         }
       }
