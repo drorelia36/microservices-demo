@@ -8,15 +8,16 @@ spec:
   serviceAccountName: jenkins
   containers:
   - name: tools
-    image: dtzar/helm-kubectl:3.14.4
+    # שימוש בתמונה קלה שיש בה apk/package manager (alpine) כדי שנוכל להתקין כלים זמניים
+    image: alpine:3.20
     command: ["sh", "-c", "cat"]
     tty: true
     volumeMounts:
     - mountPath: "/home/jenkins/agent"
       name: "workspace-volume"
       readOnly: false
-
   - name: kaniko
+    # Use the debug variant which includes a shell so the container can stay alive/debug-able
     image: gcr.io/kaniko-project/executor:debug
     command: ["sh", "-c", "cat"]
     tty: true
@@ -27,7 +28,6 @@ spec:
     - name: gcp-sa
       mountPath: /secret
       readOnly: true
-
   volumes:
   - name: "workspace-volume"
     emptyDir: {}
@@ -47,15 +47,9 @@ spec:
     PROJECT_ID = "dror-project-482618"
     REGION     = "europe-west1"
     AR_REPO    = "microservices"
-
-    // מסלול B: 3 סביבות
-    DEV_NS     = "onlineboutique-dev"
-    STAGE_NS   = "onlineboutique-staging"
-    PROD_NS    = "onlineboutique-prod"
   }
 
   stages {
-
     stage("Checkout") {
       steps { checkout scm }
     }
@@ -78,17 +72,21 @@ spec:
         container('tools') {
           sh '''
             set -euo pipefail
-            echo "=== Lint/Test ==="
 
-            # אם make קיים - נריץ. אם אין/כשל - נדע במקום שהפייפליין יקרוס בלי הסבר
+            # התקנה קצרה של כלים נחוצים (make/git/curl וכו') בזמן הריצה
+            # apk צריך לעבוד בתמונה alpine
+            apk add --no-cache make git curl bash
+
             if [ -f Makefile ]; then
-              make lint || (echo "lint failed" && exit 1)
-              make test || (echo "test failed" && exit 1)
+              echo "=== Running lint ==="
+              make lint || { echo "lint failed"; exit 1; }
+              echo "=== Running test ==="
+              make test || { echo "test failed"; exit 1; }
             else
-              echo "No Makefile - skipping lint/test"
+              echo "No Makefile found — skipping lint/test"
             fi
 
-            echo "✅ CI OK"
+            echo "✅ CI (lint+test) OK"
           '''
         }
       }
@@ -100,57 +98,24 @@ spec:
         container('kaniko') {
           sh '''
             set -euo pipefail
+
+            echo "=== Kaniko: setting credentials ==="
             export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
 
             TAG="${GIT_COMMIT:0:7}"
             IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
-            IMAGE_LATEST="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:main-latest"
 
-            echo "🏗️ Building and pushing:"
-            echo " - ${IMAGE}"
-            echo " - ${IMAGE_LATEST}"
+            echo "Building and pushing ${IMAGE}"
 
             /kaniko/executor \
               --context "${WORKSPACE}/src/frontend" \
               --dockerfile "${WORKSPACE}/src/frontend/Dockerfile" \
               --destination "${IMAGE}" \
-              --destination "${IMAGE_LATEST}" \
               --cache=true \
               --verbosity=debug
 
             echo "✅ Image pushed: ${IMAGE}"
           '''
-        }
-      }
-    }
-
-    stage("Deploy manifests to DEV (main only)") {
-      when { branch "main" }
-      steps {
-        container('tools') {
-          sh '''
-            set -euo pipefail
-            echo "�� Deploying base manifests to DEV namespace: ${DEV_NS}"
-
-            kubectl get ns "${DEV_NS}" >/dev/null 2>&1 || kubectl create ns "${DEV_NS}"
-
-            # פריסה ראשונית של כל המיקרו-סרביסים ל-DEV
-            kubectl apply -n "${DEV_NS}" -f release/kubernetes-manifests.yaml
-
-            echo "✅ DEV manifests applied"
-          '''
-        }
-      }
-      post {
-        failure {
-          container('tools') {
-            sh '''
-              set +e
-              echo "❌ DEV deploy (manifests) failed - diagnostics"
-              kubectl -n "${DEV_NS}" get pods -o wide || true
-              kubectl -n "${DEV_NS}" get events --sort-by=.lastTimestamp | tail -n 60 || true
-            '''
-          }
         }
       }
     }
@@ -161,79 +126,25 @@ spec:
         container('tools') {
           sh '''
             set -euo pipefail
-
             TAG="${GIT_COMMIT:0:7}"
             IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
 
-            echo "🚀 Updating DEV frontend image to ${IMAGE}"
-            kubectl -n "${DEV_NS}" set image deploy/frontend server="${IMAGE}"
-            kubectl -n "${DEV_NS}" rollout status deploy/frontend --timeout=600s
-
-            echo "✅ DEV frontend rolled out"
-          '''
-        }
-      }
-      post {
-        failure {
-          container('tools') {
-            sh '''
-              set +e
-              echo "❌ DEV frontend rollout failed - diagnostics"
-              kubectl -n "${DEV_NS}" get pods -l app=frontend -o wide || true
-              kubectl -n "${DEV_NS}" describe deploy frontend || true
-              kubectl -n "${DEV_NS}" describe pod -l app=frontend || true
-              kubectl -n "${DEV_NS}" get events --sort-by=.lastTimestamp | tail -n 60 || true
-            '''
-          }
-        }
-      }
-    }
-
-    stage("Promote to STAGING (manual approval)") {
-      when { branch "main" }
-      steps {
-        input message: "Promote this build to STAGING?", ok: "Promote"
-        container('tools') {
-          sh '''
-            set -euo pipefail
-
-            TAG="${GIT_COMMIT:0:7}"
-            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
-
-            echo "🚀 Promoting to STAGING namespace: ${STAGE_NS}"
-            kubectl get ns "${STAGE_NS}" >/dev/null 2>&1 || kubectl create ns "${STAGE_NS}"
-            kubectl apply -n "${STAGE_NS}" -f release/kubernetes-manifests.yaml
-
-            kubectl -n "${STAGE_NS}" set image deploy/frontend server="${IMAGE}"
-            kubectl -n "${STAGE_NS}" rollout status deploy/frontend --timeout=600s
-
-            echo "✅ STAGING promoted"
+            echo "🚀 Deploying ${IMAGE}"
+            kubectl -n onlineboutique set image deploy/frontend "server=${IMAGE}" || { echo "kubectl set image failed"; exit 1; }
+            kubectl -n onlineboutique rollout status deploy/frontend --timeout=600s
+            echo "✅ deployed ${IMAGE}"
           '''
         }
       }
     }
 
-    stage("Promote to PROD (manual approval)") {
-      when { branch "main" }
-      steps {
-        input message: "Promote this build to PROD?", ok: "Promote"
-        container('tools') {
-          sh '''
-            set -euo pipefail
+    // אפשר להוסיף שלבי קידום ידני/אוטומטי כאן (staging/prod עם approvals)
+  }
 
-            TAG="${GIT_COMMIT:0:7}"
-            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
-
-            echo "🚀 Promoting to PROD namespace: ${PROD_NS}"
-            kubectl get ns "${PROD_NS}" >/dev/null 2>&1 || kubectl create ns "${PROD_NS}"
-            kubectl apply -n "${PROD_NS}" -f release/kubernetes-manifests.yaml
-
-            kubectl -n "${PROD_NS}" set image deploy/frontend server="${IMAGE}"
-            kubectl -n "${PROD_NS}" rollout status deploy/frontend --timeout=600s
-
-            echo "✅ PROD promoted"
-          '''
-        }
+  post {
+    always {
+      container('tools') {
+        sh 'echo "Pipeline finished (status: ${CURRENT_STATUS})" || true'
       }
     }
   }
