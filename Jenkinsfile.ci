@@ -1,95 +1,146 @@
 pipeline {
-  agent any
+  agent {
+    kubernetes {
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: tools
+    image: alpine:3.20
+    command: ["sh", "-c", "cat"]
+    tty: true
+    volumeMounts:
+    - mountPath: "/home/jenkins/agent"
+      name: "workspace-volume"
+      readOnly: false
+
+  - name: kubectl
+    image: dtzar/helm-kubectl:3.14.4
+    command: ["sh", "-c", "cat"]
+    tty: true
+    volumeMounts:
+    - mountPath: "/home/jenkins/agent"
+      name: "workspace-volume"
+      readOnly: false
+
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command: ["sh", "-c", "cat"]
+    tty: true
+    volumeMounts:
+    - name: "workspace-volume"
+      mountPath: "/home/jenkins/agent"
+      readOnly: false
+    - name: gcp-sa
+      mountPath: /secret
+      readOnly: true
+
+  volumes:
+  - name: "workspace-volume"
+    emptyDir: {}
+  - name: gcp-sa
+    secret:
+      secretName: gcp-sa-json
+"""
+    }
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
 
   environment {
-    // GitHub
-    GITHUB_OWNER = "YOUR_GITHUB_USER_OR_ORG"
-    UPSTREAM_REPO = "GoogleCloudPlatform/microservices-demo"
-    FORK_REPO = "microservices-demo"
-
-    // GCP / GKE
-    GCP_PROJECT = "YOUR_GCP_PROJECT_ID"
-    GKE_CLUSTER = "YOUR_GKE_CLUSTER_NAME"
-    GKE_REGION  = "YOUR_GKE_REGION"   // e.g. us-central1 (or use ZONE if zonal)
-    K8S_NAMESPACE = "onlineboutique"
+    PROJECT_ID = "dror-project-482618"
+    REGION     = "europe-west1"
+    AR_REPO    = "microservices"
   }
 
   stages {
-    stage("Ensure fork exists") {
+    stage("Checkout") {
+      steps { checkout scm }
+    }
+
+    stage("Info") {
       steps {
-        withCredentials([string(credentialsId: 'github_pat', variable: 'GITHUB_PAT')]) {
+        container('tools') {
           sh '''
             set -euo pipefail
+            echo "BRANCH_NAME=${BRANCH_NAME}"
+            echo "CHANGE_ID=${CHANGE_ID:-}"
+            echo "GIT_COMMIT=${GIT_COMMIT}"
+          '''
+        }
+      }
+    }
 
-            api="https://api.github.com"
-            repo_url="$api/repos/${GITHUB_OWNER}/${FORK_REPO}"
+    stage("Lint/Test") {
+      steps {
+        container('tools') {
+          sh '''
+            set -euo pipefail
+            apk add --no-cache make git curl bash
 
-            # Check if fork already exists
-            code=$(curl -s -o /dev/null -w "%{http_code}" \
-              -H "Authorization: token ${GITHUB_PAT}" \
-              -H "Accept: application/vnd.github+json" \
-              "$repo_url")
-
-            if [ "$code" = "200" ]; then
-              echo "Fork already exists: ${GITHUB_OWNER}/${FORK_REPO}"
-              exit 0
+            if [ -f Makefile ]; then
+              echo "=== Running lint ==="
+              make lint || { echo "lint failed"; exit 1; }
+              echo "=== Running test ==="
+              make test || { echo "test failed"; exit 1; }
+            else
+              echo "No Makefile found — skipping lint/test"
             fi
 
-            echo "Fork not found. Creating fork..."
-            curl -sS -X POST \
-              -H "Authorization: token ${GITHUB_PAT}" \
-              -H "Accept: application/vnd.github+json" \
-              "$api/repos/${UPSTREAM_REPO}/forks" \
-              -d "{\"owner\":\"${GITHUB_OWNER}\",\"name\":\"${FORK_REPO}\"}"
-
-            echo "Fork requested. Waiting a bit for GitHub to finish provisioning..."
-            sleep 10
+            echo "✅ CI (lint+test) OK"
           '''
         }
       }
     }
 
-    stage("Checkout fork") {
+    stage("Build & Push frontend image (main only)") {
+      when { branch "main" }
       steps {
-        withCredentials([string(credentialsId: 'github_pat', variable: 'GITHUB_PAT')]) {
+        container('kaniko') {
           sh '''
             set -euo pipefail
-            rm -rf repo
-            git clone "https://${GITHUB_PAT}@github.com/${GITHUB_OWNER}/${FORK_REPO}.git" repo
+            export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
+
+            TAG="${GIT_COMMIT:0:7}"
+            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+
+            echo "Building and pushing ${IMAGE}"
+
+            /kaniko/executor \
+              --context "${WORKSPACE}/src/frontend" \
+              --dockerfile "${WORKSPACE}/src/frontend/Dockerfile" \
+              --destination "${IMAGE}" \
+              --cache=true \
+              --verbosity=debug
+
+            echo "✅ Image pushed: ${IMAGE}"
           '''
         }
       }
     }
 
-    stage("Auth to GCP & Get GKE creds") {
+    stage("Deploy frontend image to DEV (main only)") {
+      when { branch "main" }
       steps {
-        withCredentials([file(credentialsId: 'gcp_sa_json', variable: 'SA_KEY')]) {
+        container('kubectl') {
           sh '''
             set -euo pipefail
-            gcloud auth activate-service-account --key-file="$SA_KEY"
-            gcloud config set project "${GCP_PROJECT}"
-            gcloud container clusters get-credentials "${GKE_CLUSTER}" --region "${GKE_REGION}"
+            kubectl version --client=true
+
+            TAG="${GIT_COMMIT:0:7}"
+            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+
+            echo "🚀 Deploying ${IMAGE}"
+            kubectl -n onlineboutique set image deploy/frontend "server=${IMAGE}"
+            kubectl -n onlineboutique rollout status deploy/frontend --timeout=600s
+            echo "✅ deployed ${IMAGE}"
           '''
         }
-      }
-    }
-
-    stage("Deploy Online Boutique") {
-      steps {
-        sh '''
-          set -euo pipefail
-          cd repo
-
-          kubectl get ns "${K8S_NAMESPACE}" >/dev/null 2>&1 || kubectl create ns "${K8S_NAMESPACE}"
-
-          # Online Boutique manifests live here:
-          # https://github.com/GoogleCloudPlatform/microservices-demo/tree/main/release
-          kubectl apply -n "${K8S_NAMESPACE}" -f ./release/kubernetes-manifests.yaml
-
-          kubectl rollout status -n "${K8S_NAMESPACE}" deploy/frontend --timeout=300s || true
-          kubectl get pods -n "${K8S_NAMESPACE}" -o wide
-          kubectl get svc -n "${K8S_NAMESPACE}" -o wide
-        '''
       }
     }
   }
