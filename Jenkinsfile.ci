@@ -12,38 +12,44 @@ spec:
     command: ["sh", "-c", "cat"]
     tty: true
     volumeMounts:
-    - mountPath: "/home/jenkins/agent"
-      name: "workspace-volume"
-      readOnly: false
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2
     command: ["sh", "-c", "cat"]
     tty: true
+    env:
+    - name: DOCKER_CONFIG
+      value: /kaniko/.docker
     volumeMounts:
-    - name: "workspace-volume"
-      mountPath: "/home/jenkins/agent"
-      readOnly: false
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
     - name: gcp-sa
       mountPath: /secret
       readOnly: true
+    - name: docker-config
+      mountPath: /kaniko/.docker
+
   volumes:
-  - name: "workspace-volume"
+  - name: workspace-volume
     emptyDir: {}
   - name: gcp-sa
     secret:
       secretName: gcp-sa-json
+  - name: docker-config
+    emptyDir: {}
 """
     }
   }
 
   options {
-    // אם התקנת Timestamper זה עובד, אם לא – אפשר להסיר
     timestamps()
     disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '20'))
   }
 
   environment {
-    // תעדכן כאן לערכים שלך:
     PROJECT_ID = "dror-project-482618"
     REGION     = "europe-west1"
     AR_REPO    = "microservices"
@@ -51,9 +57,7 @@ spec:
 
   stages {
     stage("Checkout") {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage("Info") {
@@ -64,6 +68,9 @@ spec:
             echo "BRANCH_NAME=${BRANCH_NAME}"
             echo "CHANGE_ID=${CHANGE_ID:-}"
             echo "GIT_COMMIT=${GIT_COMMIT}"
+            echo "WORKSPACE=${WORKSPACE}"
+            ls -la
+            test -f src/frontend/Dockerfile && echo "✅ Found src/frontend/Dockerfile" || (echo "❌ Missing src/frontend/Dockerfile" && exit 1)
           '''
         }
       }
@@ -78,10 +85,10 @@ spec:
             apk add --no-cache make
 
             echo "=== Running lint ==="
-            make lint
+            make lint || (echo "❌ lint failed" && exit 1)
 
             echo "=== Running test ==="
-            make test
+            make test || (echo "❌ test failed" && exit 1)
 
             echo "✅ CI (lint+test) OK"
           '''
@@ -90,27 +97,41 @@ spec:
     }
 
     stage("Build & Push frontend image (main only)") {
-      when {
-        branch "main"
-      }
+      when { branch "main" }
       steps {
         container('kaniko') {
           sh '''
             set -euo pipefail
 
-            echo "=== Kaniko: setting credentials ==="
             export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
 
             TAG="${GIT_COMMIT:0:7}"
             IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
 
-            echo "Building and pushing ${IMAGE}"
+            echo "=== Kaniko: preparing docker auth for Artifact Registry ==="
+            mkdir -p /kaniko/.docker
+
+            # Kaniko קורא auth מ־/kaniko/.docker/config.json
+            # ניצור config.json שמצביע על key JSON (service account)
+            cat > /kaniko/.docker/config.json <<EOF
+{
+  "auths": {
+    "https://${REGION}-docker.pkg.dev": {
+      "username": "_json_key",
+      "password": "$(cat /secret/sa.json | tr -d '\\n' | sed 's/"/\\\\\\"/g')"
+    }
+  }
+}
+EOF
+
+            echo "=== Building and pushing: ${IMAGE} ==="
 
             /kaniko/executor \
               --context "${WORKSPACE}" \
               --dockerfile "${WORKSPACE}/src/frontend/Dockerfile" \
               --destination "${IMAGE}" \
-              --cache=true
+              --cache=true \
+              --cache-repo "${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/cache"
 
             echo "✅ Image pushed: ${IMAGE}"
           '''
