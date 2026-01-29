@@ -53,18 +53,13 @@ spec:
     PROJECT_ID = "dror-project-482618"
     REGION     = "europe-west1"
     AR_REPO    = "microservices"
-
     DEV_NS     = "onlineboutique-dev"
-    STAGING_NS = "onlineboutique-staging"
-    PROD_NS    = "onlineboutique-prod"
   }
 
   stages {
 
     stage("Checkout") {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage("Info") {
@@ -85,7 +80,6 @@ spec:
           sh '''
             set -euo pipefail
             apk add --no-cache make git bash
-
             if [ -f Makefile ]; then
               make lint
               make test
@@ -109,13 +103,60 @@ spec:
             SERVICES="adservice cartservice checkoutservice currencyservice emailservice \
                       paymentservice productcatalogservice recommendationservice shippingservice frontend"
 
+            find_dockerfile() {
+              local svc="$1"
+              local ctx="${WORKSPACE}/src/${svc}"
+
+              # 1) standard path
+              if [ -f "${ctx}/Dockerfile" ]; then
+                echo "${ctx}/Dockerfile"
+                return 0
+              fi
+
+              # 2) try to find any Dockerfile under service dir (first match)
+              local found
+              found="$(find "${ctx}" -maxdepth 4 -type f -iname 'Dockerfile' | head -n 1 || true)"
+              if [ -n "${found}" ]; then
+                echo "${found}"
+                return 0
+              fi
+
+              return 1
+            }
+
             for SVC in $SERVICES; do
+              CTX="${WORKSPACE}/src/${SVC}"
+              if [ ! -d "${CTX}" ]; then
+                echo "❌ Service directory not found: ${CTX}"
+                exit 1
+              fi
+
+              DOCKERFILE="$(find_dockerfile "${SVC}" || true)"
+              if [ -z "${DOCKERFILE}" ]; then
+                echo "❌ No Dockerfile found for ${SVC} under ${CTX}"
+                echo "   Fix by adding Dockerfile or adjust mapping."
+                exit 1
+              fi
+
+              # Kaniko requires dockerfile path relative to context OR absolute but within context.
+              # We'll pass absolute, but ensure it's under CTX:
+              case "${DOCKERFILE}" in
+                ${CTX}/*) ;;
+                *)
+                  echo "❌ Dockerfile for ${SVC} is outside build context: ${DOCKERFILE}"
+                  exit 1
+                  ;;
+              esac
+
               IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SVC}:${TAG}"
-              echo "🚀 Building and pushing ${IMAGE}"
+              echo "🚀 Building ${SVC}"
+              echo "   Context: ${CTX}"
+              echo "   Dockerfile: ${DOCKERFILE}"
+              echo "   Destination: ${IMAGE}"
 
               /kaniko/executor \
-                --context "${WORKSPACE}/src/${SVC}" \
-                --dockerfile "${WORKSPACE}/src/${SVC}/Dockerfile" \
+                --context "${CTX}" \
+                --dockerfile "${DOCKERFILE}" \
                 --destination "${IMAGE}" \
                 --cache=true
             done
@@ -130,7 +171,6 @@ spec:
         container('kubectl') {
           sh '''
             set -euo pipefail
-            echo "📦 Applying manifests to ${DEV_NS}"
             kubectl -n "${DEV_NS}" apply -k kubernetes-manifests
           '''
         }
@@ -163,7 +203,6 @@ spec:
         container('kubectl') {
           sh '''
             set -euo pipefail
-            echo "🔌 Scaling DEV services to replicas=1"
             kubectl scale deploy \
               adservice cartservice checkoutservice currencyservice emailservice \
               paymentservice productcatalogservice recommendationservice shippingservice frontend redis-cart \
@@ -172,7 +211,6 @@ spec:
         }
       }
     }
-
   }
 }
 
