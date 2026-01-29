@@ -90,14 +90,14 @@ spec:
               make lint
               make test
             else
-              echo "No Makefile – skipping"
+              echo "No Makefile – skipping lint/test"
             fi
           '''
         }
       }
     }
 
-    stage("Build & Push frontend image (main only)") {
+    stage("Build & Push service images (main only)") {
       when { branch "main" }
       steps {
         container('kaniko') {
@@ -106,17 +106,19 @@ spec:
             export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
 
             TAG="${GIT_COMMIT:0:7}"
-            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+            SERVICES="adservice cartservice checkoutservice currencyservice emailservice \
+                      paymentservice productcatalogservice recommendationservice shippingservice frontend"
 
-            echo "Building and pushing ${IMAGE}"
+            for SVC in $SERVICES; do
+              IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SVC}:${TAG}"
+              echo "🚀 Building and pushing ${IMAGE}"
 
-            /kaniko/executor \
-              --context "${WORKSPACE}/src/frontend" \
-              --dockerfile "${WORKSPACE}/src/frontend/Dockerfile" \
-              --destination "${IMAGE}" \
-              --cache=true
-
-            echo "✅ Image pushed: ${IMAGE}"
+              /kaniko/executor \
+                --context "${WORKSPACE}/src/${SVC}" \
+                --dockerfile "${WORKSPACE}/src/${SVC}/Dockerfile" \
+                --destination "${IMAGE}" \
+                --cache=true
+            done
           '''
         }
       }
@@ -128,23 +130,28 @@ spec:
         container('kubectl') {
           sh '''
             set -euo pipefail
+            echo "📦 Applying manifests to ${DEV_NS}"
             kubectl -n "${DEV_NS}" apply -k kubernetes-manifests
           '''
         }
       }
     }
 
-    stage("Deploy frontend image to DEV") {
+    stage("Deploy service images to DEV") {
       when { branch "main" }
       steps {
         container('kubectl') {
           sh '''
             set -euo pipefail
             TAG="${GIT_COMMIT:0:7}"
-            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+            SERVICES="adservice cartservice checkoutservice currencyservice emailservice \
+                      paymentservice productcatalogservice recommendationservice shippingservice frontend"
 
-            kubectl -n "${DEV_NS}" set image deploy/frontend server=${IMAGE}
-            kubectl -n "${DEV_NS}" rollout status deploy/frontend --timeout=600s
+            for SVC in $SERVICES; do
+              IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SVC}:${TAG}"
+              echo "📦 Updating ${SVC} -> ${IMAGE}"
+              kubectl -n "${DEV_NS}" set image deploy/${SVC} server=${IMAGE}
+            done
           '''
         }
       }
@@ -156,8 +163,11 @@ spec:
         container('kubectl') {
           sh '''
             set -euo pipefail
-            echo "🔌 Scaling DEV deployments to replicas=1"
-            kubectl scale deploy --all -n "${DEV_NS}" --replicas=1
+            echo "🔌 Scaling DEV services to replicas=1"
+            kubectl scale deploy \
+              adservice cartservice checkoutservice currencyservice emailservice \
+              paymentservice productcatalogservice recommendationservice shippingservice frontend redis-cart \
+              -n "${DEV_NS}" --replicas=1
           '''
         }
       }
