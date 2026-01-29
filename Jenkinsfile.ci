@@ -14,7 +14,6 @@ spec:
     volumeMounts:
     - mountPath: "/home/jenkins/agent"
       name: "workspace-volume"
-      readOnly: false
 
   - name: kubectl
     image: dtzar/helm-kubectl:3.14.4
@@ -23,22 +22,20 @@ spec:
     volumeMounts:
     - mountPath: "/home/jenkins/agent"
       name: "workspace-volume"
-      readOnly: false
 
   - name: kaniko
     image: gcr.io/kaniko-project/executor:debug
     command: ["sh", "-c", "cat"]
     tty: true
     volumeMounts:
-    - name: "workspace-volume"
-      mountPath: "/home/jenkins/agent"
-      readOnly: false
-    - name: gcp-sa
-      mountPath: /secret
+    - mountPath: "/home/jenkins/agent"
+      name: "workspace-volume"
+    - mountPath: /secret
+      name: gcp-sa
       readOnly: true
 
   volumes:
-  - name: "workspace-volume"
+  - name: workspace-volume
     emptyDir: {}
   - name: gcp-sa
     secret:
@@ -58,14 +55,16 @@ spec:
     AR_REPO    = "microservices"
 
     DEV_NS     = "onlineboutique-dev"
-    // בהמשך נוסיף גם:
-    // STAGING_NS = "onlineboutique-staging"
-    // PROD_NS    = "onlineboutique-prod"
+    STAGING_NS = "onlineboutique-staging"
+    PROD_NS    = "onlineboutique-prod"
   }
 
   stages {
+
     stage("Checkout") {
-      steps { checkout scm }
+      steps {
+        checkout scm
+      }
     }
 
     stage("Info") {
@@ -74,36 +73,31 @@ spec:
           sh '''
             set -euo pipefail
             echo "BRANCH_NAME=${BRANCH_NAME}"
-            echo "CHANGE_ID=${CHANGE_ID:-}"
             echo "GIT_COMMIT=${GIT_COMMIT}"
           '''
         }
       }
     }
 
-    stage("Lint/Test") {
+    stage("Lint / Test") {
       steps {
         container('tools') {
           sh '''
             set -euo pipefail
-            apk add --no-cache make git curl bash
+            apk add --no-cache make git bash
 
             if [ -f Makefile ]; then
-              echo "=== Running lint ==="
-              make lint || { echo "lint failed"; exit 1; }
-              echo "=== Running test ==="
-              make test || { echo "test failed"; exit 1; }
+              make lint
+              make test
             else
-              echo "No Makefile found — skipping lint/test"
+              echo "No Makefile – skipping"
             fi
-
-            echo "✅ CI (lint+test) OK"
           '''
         }
       }
     }
 
-    stage("Build & Push frontend image (main only)") {
+    stage("Build & Push images (main only)") {
       when { branch "main" }
       steps {
         container('kaniko') {
@@ -112,55 +106,50 @@ spec:
             export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
 
             TAG="${GIT_COMMIT:0:7}"
-            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+            SERVICES="adservice cartservice checkoutservice currencyservice emailservice frontend paymentservice productcatalogservice recommendationservice shippingservice"
 
-            echo "Building and pushing ${IMAGE}"
+            for SVC in $SERVICES; do
+              IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SVC}:${TAG}"
+              echo "=== Building ${IMAGE} ==="
 
-            /kaniko/executor \
-              --context "${WORKSPACE}/src/frontend" \
-              --dockerfile "${WORKSPACE}/src/frontend/Dockerfile" \
-              --destination "${IMAGE}" \
-              --cache=true \
-              --verbosity=debug
-
-            echo "✅ Image pushed: ${IMAGE}"
+              /kaniko/executor \
+                --context "${WORKSPACE}/src/${SVC}" \
+                --dockerfile "${WORKSPACE}/src/${SVC}/Dockerfile" \
+                --destination "${IMAGE}" \
+                --cache=true
+            done
           '''
         }
       }
     }
 
-    stage("Deploy manifests to DEV (main only)") {
+    stage("Deploy manifests to DEV") {
       when { branch "main" }
       steps {
         container('kubectl') {
           sh '''
             set -euo pipefail
-            kubectl version --client=true
-
-            echo "🚀 Applying manifests to namespace: ${DEV_NS}"
             kubectl -n "${DEV_NS}" apply -k kubernetes-manifests
-
-            echo "✅ Manifests applied to ${DEV_NS}"
           '''
         }
       }
     }
 
-    stage("Deploy frontend image to DEV (main only)") {
+    stage("Deploy images to DEV") {
       when { branch "main" }
       steps {
         container('kubectl') {
           sh '''
             set -euo pipefail
-            kubectl version --client=true
-
             TAG="${GIT_COMMIT:0:7}"
-            IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
+            SERVICES="adservice cartservice checkoutservice currencyservice emailservice frontend paymentservice productcatalogservice recommendationservice shippingservice"
 
-            echo "🚀 Deploying ${IMAGE} to ${DEV_NS}"
-            kubectl -n "${DEV_NS}" set image deploy/frontend "server=${IMAGE}"
-            kubectl -n "${DEV_NS}" rollout status deploy/frontend --timeout=600s
-            echo "✅ deployed ${IMAGE} to ${DEV_NS}"
+            for SVC in $SERVICES; do
+              IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SVC}:${TAG}"
+              echo "Deploying ${SVC} -> ${IMAGE}"
+              kubectl -n "${DEV_NS}" set image deploy/${SVC} server=${IMAGE}
+              kubectl -n "${DEV_NS}" rollout status deploy/${SVC} --timeout=600s
+            done
           '''
         }
       }
