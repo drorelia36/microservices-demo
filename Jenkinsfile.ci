@@ -56,6 +56,11 @@ spec:
     PROJECT_ID = "dror-project-482618"
     REGION     = "europe-west1"
     AR_REPO    = "microservices"
+
+    DEV_NS     = "onlineboutique-dev"
+    // בהמשך נוסיף גם:
+    // STAGING_NS = "onlineboutique-staging"
+    // PROD_NS    = "onlineboutique-prod"
   }
 
   stages {
@@ -124,6 +129,23 @@ spec:
       }
     }
 
+    stage("Deploy manifests to DEV (main only)") {
+      when { branch "main" }
+      steps {
+        container('kubectl') {
+          sh '''
+            set -euo pipefail
+            kubectl version --client=true
+
+            echo "🚀 Applying manifests to namespace: ${DEV_NS}"
+            kubectl -n "${DEV_NS}" apply -k kubernetes-manifests
+
+            echo "✅ Manifests applied to ${DEV_NS}"
+          '''
+        }
+      }
+    }
+
     stage("Deploy frontend image to DEV (main only)") {
       when { branch "main" }
       steps {
@@ -135,10 +157,10 @@ spec:
             TAG="${GIT_COMMIT:0:7}"
             IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/frontend:${TAG}"
 
-            echo "🚀 Deploying ${IMAGE}"
-            kubectl -n onlineboutique set image deploy/frontend "server=${IMAGE}"
-            kubectl -n onlineboutique rollout status deploy/frontend --timeout=600s
-            echo "✅ deployed ${IMAGE}"
+            echo "🚀 Deploying ${IMAGE} to ${DEV_NS}"
+            kubectl -n "${DEV_NS}" set image deploy/frontend "server=${IMAGE}"
+            kubectl -n "${DEV_NS}" rollout status deploy/frontend --timeout=600s
+            echo "✅ deployed ${IMAGE} to ${DEV_NS}"
           '''
         }
       }
