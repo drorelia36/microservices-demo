@@ -21,13 +21,13 @@ spec:
 
   environment {
     DEV_NS     = "onlineboutique-dev"
-    STAGING_NS = "onlineboutique-staging"
+    STAGE_NS   = "onlineboutique-staging"
     PROD_NS    = "onlineboutique-prod"
-
-    MANIFEST_FILE = "release/kubernetes-manifests.yaml"
+    MANIFEST   = "release/kubernetes-manifests.yaml"
   }
 
   stages {
+
     stage("Checkout") {
       steps {
         container("git") {
@@ -36,100 +36,93 @@ spec:
       }
     }
 
-    stage("Detect ref (branch/tag) + choose target namespace") {
+    stage("Decide target environment") {
       steps {
-        container("git") {
-          script {
-            def detectedTag = env.TAG_NAME
-            if (!detectedTag?.trim()) {
-              detectedTag = sh(
-                script: 'git describe --tags --exact-match 2>/dev/null || true',
-                returnStdout: true
-              ).trim()
-            }
+        script {
+          env.DEPLOY_ENV = ""
+          env.TARGET_NS  = ""
 
-            env.DETECTED_TAG = detectedTag ?: ""
-            env.DEPLOY_ENV = "none"
-            env.TARGET_NS = ""
+          // branch build
+          if (env.BRANCH_NAME == "main") {
+            env.DEPLOY_ENV = "dev"
+            env.TARGET_NS  = env.DEV_NS
+          }
 
-            if (env.BRANCH_NAME == "main" && !env.DETECTED_TAG) {
-              env.DEPLOY_ENV = "dev"
-              env.TARGET_NS = env.DEV_NS
-            } else if (env.DETECTED_TAG ==~ /^v\\d+\\.\\d+\\.\\d+-rc\\.\\d+$/) {
+          // tag build
+          if (env.TAG_NAME?.trim()) {
+            if (env.TAG_NAME ==~ /^v\\d+\\.\\d+\\.\\d+-rc\\.\\d+$/) {
               env.DEPLOY_ENV = "staging"
-              env.TARGET_NS = env.STAGING_NS
-            } else if (env.DETECTED_TAG ==~ /^v\\d+\\.\\d+\\.\\d+$/) {
+              env.TARGET_NS  = env.STAGE_NS
+            } else if (env.TAG_NAME ==~ /^v\\d+\\.\\d+\\.\\d+$/) {
               env.DEPLOY_ENV = "prod"
-              env.TARGET_NS = env.PROD_NS
+              env.TARGET_NS  = env.PROD_NS
+            } else {
+              error("Tag '${env.TAG_NAME}' does not match vX.Y.Z or vX.Y.Z-rc.N")
             }
+          }
 
-            echo "BRANCH_NAME=${env.BRANCH_NAME}"
-            echo "DETECTED_TAG=${env.DETECTED_TAG}"
-            echo "DEPLOY_ENV=${env.DEPLOY_ENV}"
-            echo "TARGET_NS=${env.TARGET_NS}"
+          if (!env.TARGET_NS?.trim()) {
+            error("No deploy target selected (not main, not a supported tag). BRANCH_NAME='${env.BRANCH_NAME}', TAG_NAME='${env.TAG_NAME}'")
+          }
+
+          echo "✅ DEPLOY_ENV=${env.DEPLOY_ENV}"
+          echo "✅ TARGET_NS=${env.TARGET_NS}"
+        }
+      }
+    }
+
+    stage("Guardrails") {
+      steps {
+        script {
+          // extra safety: prevent accidents
+          if (env.DEPLOY_ENV == "dev" && env.TARGET_NS != env.DEV_NS) {
+            error("DEV deploy must go only to ${env.DEV_NS}")
+          }
+          if (env.DEPLOY_ENV == "staging" && env.TARGET_NS != env.STAGE_NS) {
+            error("STAGING deploy must go only to ${env.STAGE_NS}")
+          }
+          if (env.DEPLOY_ENV == "prod" && env.TARGET_NS != env.PROD_NS) {
+            error("PROD deploy must go only to ${env.PROD_NS}")
           }
         }
       }
     }
 
-    stage("Guard: no accidental deploy") {
-      steps {
-        sh '''
-          set -euo pipefail
-
-          if [ "${DEPLOY_ENV}" = "none" ] || [ -z "${TARGET_NS}" ]; then
-            echo "ℹ️ No deploy policy matched (not main / not release tag). Exiting successfully."
-            exit 0
-          fi
-
-          # hard guard: prod namespace only allowed on prod tag
-          if [ "${TARGET_NS}" = "onlineboutique-prod" ] && [ "${DEPLOY_ENV}" != "prod" ]; then
-            echo "❌ Refusing to deploy to PROD namespace unless DEPLOY_ENV=prod"
-            exit 1
-          fi
-
-          echo "✅ Guard OK: env=${DEPLOY_ENV} ns=${TARGET_NS}"
-        '''
-      }
-    }
-
     stage("Approval (PROD only)") {
-      when { expression { return env.DEPLOY_ENV == "prod" } }
+      when {
+        expression { return env.DEPLOY_ENV == "prod" }
+      }
       steps {
-        script {
-          input message: "Deploy ${env.DETECTED_TAG} to PROD namespace (${env.PROD_NS})?", ok: "Deploy"
-        }
+        input message: "Deploy tag ${env.TAG_NAME} to PROD namespace ${env.PROD_NS} ?", ok: "Deploy"
       }
     }
 
     stage("Deploy manifests") {
-      when { expression { return env.DEPLOY_ENV in ["dev","staging","prod"] } }
       steps {
         container("kubectl") {
           sh '''
             set -euo pipefail
-            echo "🚀 Applying manifests to ${TARGET_NS}"
-            kubectl apply -n "${TARGET_NS}" -f "${MANIFEST_FILE}"
+            kubectl apply -n "${TARGET_NS}" -f "${MANIFEST}"
           '''
         }
       }
     }
 
     stage("Rollout frontend") {
-      when { expression { return env.DEPLOY_ENV in ["dev","staging","prod"] } }
       steps {
         container("kubectl") {
           sh '''
             set -euo pipefail
-            echo "⏳ Waiting for frontend rollout in ${TARGET_NS}"
             kubectl rollout status -n "${TARGET_NS}" deploy/frontend --timeout=600s
           '''
         }
       }
     }
 
-    stage("Scale up (all deployments)") {
-      when { expression { return env.DEPLOY_ENV in ["dev","staging","prod"] } }
+    stage("Scale up (DEV/STAGING only)") {
+      when {
+        expression { return env.DEPLOY_ENV == "dev" || env.DEPLOY_ENV == "staging" }
+      }
       steps {
         container("kubectl") {
           sh '''
@@ -142,7 +135,6 @@ spec:
     }
 
     stage("Show pods") {
-      when { expression { return env.DEPLOY_ENV in ["dev","staging","prod"] } }
       steps {
         container("kubectl") {
           sh '''
