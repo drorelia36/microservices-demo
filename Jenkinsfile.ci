@@ -1,243 +1,78 @@
-// Jenkinsfile.ci
 pipeline {
   agent {
     kubernetes {
-      label "microservices-demo-ci-${env.BRANCH_NAME ?: 'na'}-${env.BUILD_NUMBER ?: '0'}"
-      defaultContainer 'tools'
       yaml """
 apiVersion: v1
 kind: Pod
-metadata:
-  labels:
-    app: microservices-demo-ci
 spec:
   serviceAccountName: jenkins
-  restartPolicy: Never
-  nodeSelector:
-    kubernetes.io/os: linux
-  volumes:
-    - name: workspace-volume
-      emptyDir: {}
-    - name: gcp-sa
-      secret:
-        secretName: gcp-sa-json
   containers:
-    - name: tools
-      image: alpine:3.20
-      command: ["sh","-c","cat"]
-      tty: true
-      volumeMounts:
-        - name: workspace-volume
-          mountPath: /home/jenkins/agent
-    - name: kubectl
-      image: dtzar/helm-kubectl:3.14.4
-      command: ["sh","-c","cat"]
-      tty: true
-      volumeMounts:
-        - name: workspace-volume
-          mountPath: /home/jenkins/agent
-    - name: kaniko
-      image: gcr.io/kaniko-project/executor:debug
-      command: ["sh","-c","cat"]
-      tty: true
-      volumeMounts:
-        - name: workspace-volume
-          mountPath: /home/jenkins/agent
-        - name: gcp-sa
-          mountPath: /secret
-          readOnly: true
+  - name: kubectl
+    image: dtzar/helm-kubectl:3.14.4
+    command: ["cat"]
+    tty: true
+  - name: git
+    image: alpine/git:2.45.2
+    command: ["cat"]
+    tty: true
 """
     }
   }
 
-  options {
-    timestamps()
-    ansiColor('xterm')
-    disableConcurrentBuilds()
-  }
-
   environment {
-    DEV_NS     = "onlineboutique-dev"
-
-    // Artifact Registry config (matches your logs)
-    REGION     = "europe-west1"
-    PROJECT_ID = "dror-project-482618"
-    AR_REPO    = "microservices"
-
-    // Services you asked to enable + frontend
-    SERVICES   = "adservice cartservice checkoutservice currencyservice emailservice paymentservice productcatalogservice recommendationservice shippingservice frontend"
+    DEV_NS = "onlineboutique-dev"
   }
 
   stages {
-
-    stage('Checkout') {
+    stage("Checkout") {
       steps {
-        checkout scm
-      }
-    }
-
-    stage('Info') {
-      steps {
-        container('tools') {
-          sh '''
-            set -euo pipefail
-            echo "BRANCH_NAME=${BRANCH_NAME}"
-            echo "GIT_COMMIT=${GIT_COMMIT}"
-          '''
+        container("git") {
+          checkout scm
         }
       }
     }
 
-    stage('Lint / Test') {
+    stage("Guard: DEV only") {
       steps {
-        container('tools') {
-          sh '''
-            set -euo pipefail
-            apk add --no-cache make git bash
-            if [ -f Makefile ]; then
-              make lint
-              make test
-            else
-              echo "No Makefile found; skipping lint/test"
-            fi
-          '''
-        }
+        sh '''
+          set -euo pipefail
+          if [ "${DEV_NS}" = "onlineboutique" ]; then
+            echo "❌ Refusing to deploy to prod namespace: ${DEV_NS}"
+            exit 1
+          fi
+          echo "✅ Target namespace: ${DEV_NS}"
+        '''
       }
     }
 
-    stage('Build & Push service images (main only)') {
+    stage("Deploy manifests to DEV") {
       when { branch "main" }
       steps {
-        container('kaniko') {
+        container("kubectl") {
           sh '''
             set -euo pipefail
-            export GOOGLE_APPLICATION_CREDENTIALS=/secret/sa.json
-
-            TAG="$(echo "${GIT_COMMIT}" | cut -c1-7)"
-            echo "Using TAG=${TAG}"
-            echo "SERVICES=${SERVICES}"
-
-            for SVC in ${SERVICES}; do
-              CTX="src/${SVC}"
-
-              if [ ! -d "${CTX}" ]; then
-                echo "❌ Missing context dir: ${CTX}"
-                exit 1
-              fi
-
-              # default (Dockerfile at root of service)
-              DOCKERFILE="Dockerfile"
-
-              # cartservice special-case: Dockerfile is under ./src/
-              if [ "${SVC}" = "cartservice" ]; then
-                DOCKERFILE="src/Dockerfile"
-              fi
-
-              if [ ! -f "${CTX}/${DOCKERFILE}" ]; then
-                echo "❌ Missing Dockerfile for ${SVC}: ${CTX}/${DOCKERFILE}"
-                echo "   Found Dockerfiles:"
-                find "${CTX}" -maxdepth 4 -iname Dockerfile -print || true
-                exit 1
-              fi
-
-              IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SVC}:${TAG}"
-              echo "🚀 Building and pushing ${IMAGE}"
-              echo "   Context: ${CTX}"
-              echo "   Dockerfile: ${DOCKERFILE}"
-
-              /kaniko/executor \
-                --context "${CTX}" \
-                --dockerfile "${DOCKERFILE}" \
-                --destination "${IMAGE}" \
-                --cache=true
-            done
+            kubectl apply -n "${DEV_NS}" -f release/kubernetes-manifests.yaml
           '''
         }
       }
     }
 
-    stage('Deploy manifests to DEV') {
+    stage("Rollout frontend (DEV)") {
       when { branch "main" }
       steps {
-        container('kubectl') {
+        container("kubectl") {
           sh '''
             set -euo pipefail
-            kubectl -n "${DEV_NS}" apply -k kubernetes-manifests
+            kubectl rollout status -n "${DEV_NS}" deploy/frontend --timeout=600s
           '''
         }
       }
     }
 
-    stage('Ensure RBAC for scaling (DEV)') {
+    stage("Scale DEV up (all deployments)") {
       when { branch "main" }
       steps {
-        container('kubectl') {
-          sh '''
-            set -euo pipefail
-            cat <<'YAML' | kubectl apply -f -
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: jenkins-scale
-  namespace: onlineboutique-dev
-rules:
-- apiGroups: ["apps"]
-  resources:
-    - deployments
-    - deployments/scale
-  verbs:
-    - get
-    - list
-    - watch
-    - patch
-    - update
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: jenkins-scale
-  namespace: onlineboutique-dev
-subjects:
-- kind: ServiceAccount
-  name: jenkins
-  namespace: jenkins
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: jenkins-scale
-YAML
-          '''
-        }
-      }
-    }
-
-    stage('Deploy service images to DEV') {
-      when { branch "main" }
-      steps {
-        container('kubectl') {
-          sh '''
-            set -euo pipefail
-            TAG="$(echo "${GIT_COMMIT}" | cut -c1-7)"
-
-            for SVC in ${SERVICES}; do
-              IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SVC}:${TAG}"
-              echo "📦 Setting image for deployment/${SVC} -> ${IMAGE}"
-
-              # Update ALL containers in the deployment (safer than assuming container name)
-              kubectl -n "${DEV_NS}" set image "deployment/${SVC}" "*=${IMAGE}"
-
-              echo "⏳ Waiting for rollout deployment/${SVC}"
-              kubectl -n "${DEV_NS}" rollout status "deployment/${SVC}" --timeout=600s
-            done
-          '''
-        }
-      }
-    }
-
-    stage('Scale DEV up') {
-      when { branch "main" }
-      steps {
-        container('kubectl') {
+        container("kubectl") {
           sh '''
             set -euo pipefail
             echo "🔌 Scaling DEV deployments to replicas=1"
@@ -246,17 +81,16 @@ YAML
         }
       }
     }
-  }
 
-  post {
-    always {
-      container('tools') {
-        sh '''
-          set +e
-          echo "=== DEV status snapshot ==="
-          kubectl get pods -n "${DEV_NS}" -o wide || true
-          kubectl get deploy -n "${DEV_NS}" || true
-        '''
+    stage("Show DEV pods") {
+      when { branch "main" }
+      steps {
+        container("kubectl") {
+          sh '''
+            set -euo pipefail
+            kubectl get pods -n "${DEV_NS}" -o wide
+          '''
+        }
       }
     }
   }
