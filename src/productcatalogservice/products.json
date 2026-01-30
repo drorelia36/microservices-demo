@@ -7,7 +7,7 @@
             "picture": "/static/img/products/sunglasses.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 22,
+                "units": 1000,
                 "nanos": 990000000
             },
             "categories": ["accessories"]
