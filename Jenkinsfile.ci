@@ -19,11 +19,14 @@ spec:
     }
   }
 
+  options {
+    timestamps()
+  }
+
   environment {
     DEV_NS     = "onlineboutique-dev"
-    STAGE_NS   = "onlineboutique-staging"
+    STAGING_NS = "onlineboutique-staging"
     PROD_NS    = "onlineboutique-prod"
-    MANIFEST   = "release/kubernetes-manifests.yaml"
   }
 
   stages {
@@ -39,32 +42,22 @@ spec:
     stage("Decide target environment") {
       steps {
         script {
-          env.DEPLOY_ENV = ""
-          env.TARGET_NS  = ""
-
-          // branch build
-          if (env.BRANCH_NAME == "main") {
+          def ref = env.BRANCH_NAME ?: ""
+          if (ref == "main") {
             env.DEPLOY_ENV = "dev"
             env.TARGET_NS  = env.DEV_NS
+          } else if (ref ==~ /^v\\d+\\.\\d+\\.\\d+-rc\\.\\d+$/) {
+            env.DEPLOY_ENV = "staging"
+            env.TARGET_NS  = env.STAGING_NS
+          } else if (ref ==~ /^v\\d+\\.\\d+\\.\\d+$/) {
+            env.DEPLOY_ENV = "prod"
+            env.TARGET_NS  = env.PROD_NS
+          } else {
+            env.DEPLOY_ENV = "none"
+            env.TARGET_NS  = ""
           }
 
-          // tag build
-          if (env.TAG_NAME?.trim()) {
-            if (env.TAG_NAME ==~ /^v\\d+\\.\\d+\\.\\d+-rc\\.\\d+$/) {
-              env.DEPLOY_ENV = "staging"
-              env.TARGET_NS  = env.STAGE_NS
-            } else if (env.TAG_NAME ==~ /^v\\d+\\.\\d+\\.\\d+$/) {
-              env.DEPLOY_ENV = "prod"
-              env.TARGET_NS  = env.PROD_NS
-            } else {
-              error("Tag '${env.TAG_NAME}' does not match vX.Y.Z or vX.Y.Z-rc.N")
-            }
-          }
-
-          if (!env.TARGET_NS?.trim()) {
-            error("No deploy target selected (not main, not a supported tag). BRANCH_NAME='${env.BRANCH_NAME}', TAG_NAME='${env.TAG_NAME}'")
-          }
-
+          echo "✅ BRANCH_NAME=${ref}"
           echo "✅ DEPLOY_ENV=${env.DEPLOY_ENV}"
           echo "✅ TARGET_NS=${env.TARGET_NS}"
         }
@@ -74,76 +67,18 @@ spec:
     stage("Guardrails") {
       steps {
         script {
-          // extra safety: prevent accidents
-          if (env.DEPLOY_ENV == "dev" && env.TARGET_NS != env.DEV_NS) {
-            error("DEV deploy must go only to ${env.DEV_NS}")
-          }
-          if (env.DEPLOY_ENV == "staging" && env.TARGET_NS != env.STAGE_NS) {
-            error("STAGING deploy must go only to ${env.STAGE_NS}")
+          if (env.DEPLOY_ENV == "none") {
+            echo "ℹ️ Not a deployable ref (only main / vX.Y.Z-rc.N / vX.Y.Z). Skipping deploy."
           }
           if (env.DEPLOY_ENV == "prod" && env.TARGET_NS != env.PROD_NS) {
-            error("PROD deploy must go only to ${env.PROD_NS}")
+            error("Ref resolved to prod but namespace is not PROD_NS. Refusing.")
           }
         }
       }
     }
 
     stage("Approval (PROD only)") {
-      when {
-        expression { return env.DEPLOY_ENV == "prod" }
-      }
+      when { expression { env.DEPLOY_ENV == "prod" } }
       steps {
-        input message: "Deploy tag ${env.TAG_NAME} to PROD namespace ${env.PROD_NS} ?", ok: "Deploy"
-      }
-    }
-
-    stage("Deploy manifests") {
-      steps {
-        container("kubectl") {
-          sh '''
-            set -euo pipefail
-            kubectl apply -n "${TARGET_NS}" -f "${MANIFEST}"
-          '''
-        }
-      }
-    }
-
-    stage("Rollout frontend") {
-      steps {
-        container("kubectl") {
-          sh '''
-            set -euo pipefail
-            kubectl rollout status -n "${TARGET_NS}" deploy/frontend --timeout=600s
-          '''
-        }
-      }
-    }
-
-    stage("Scale up (DEV/STAGING only)") {
-      when {
-        expression { return env.DEPLOY_ENV == "dev" || env.DEPLOY_ENV == "staging" }
-      }
-      steps {
-        container("kubectl") {
-          sh '''
-            set -euo pipefail
-            echo "🔌 Scaling deployments to replicas=1 in ${TARGET_NS}"
-            kubectl scale deploy --all -n "${TARGET_NS}" --replicas=1
-          '''
-        }
-      }
-    }
-
-    stage("Show pods") {
-      steps {
-        container("kubectl") {
-          sh '''
-            set -euo pipefail
-            kubectl get pods -n "${TARGET_NS}" -o wide
-          '''
-        }
-      }
-    }
-  }
-}
+        input message: "🚨 Deploy to PROD namespace (${env
 
