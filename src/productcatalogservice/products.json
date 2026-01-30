@@ -7,7 +7,7 @@
             "picture": "/static/img/products/sunglasses.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 19,
+                "units": 22,
                 "nanos": 990000000
             },
             "categories": ["accessories"]
@@ -19,7 +19,7 @@
             "picture": "/static/img/products/tank-top.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 18,
+                "units": 22,
                 "nanos": 990000000
             },
             "categories": ["clothing", "tops"]
@@ -31,7 +31,7 @@
             "picture": "/static/img/products/watch.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 109,
+                "units": 122,
                 "nanos": 990000000
             },
             "categories": ["accessories"]
@@ -43,7 +43,7 @@
             "picture": "/static/img/products/loafers.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 89,
+                "units": 122,
                 "nanos": 990000000
             },
             "categories": ["footwear"]
@@ -55,7 +55,7 @@
             "picture": "/static/img/products/hairdryer.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 24,
+                "units": 30,
                 "nanos": 990000000
             },
             "categories": ["hair", "beauty"]
@@ -67,7 +67,7 @@
             "picture": "/static/img/products/candle-holder.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 18,
+                "units": 30,
                 "nanos": 990000000
             },
             "categories": ["decor", "home"]
@@ -79,7 +79,7 @@
             "picture": "/static/img/products/salt-and-pepper-shakers.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 18,
+                "units": 31,
                 "nanos": 490000000
             },
             "categories": ["kitchen"]
@@ -91,7 +91,7 @@
             "picture": "/static/img/products/bamboo-glass-jar.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 5,
+                "units": 7,
                 "nanos": 490000000
             },
             "categories": ["kitchen"]
@@ -103,7 +103,7 @@
             "picture": "/static/img/products/mug.jpg",
             "priceUsd": {
                 "currencyCode": "USD",
-                "units": 8,
+                "units": 12,
                 "nanos": 990000000
             },
             "categories": ["kitchen"]
