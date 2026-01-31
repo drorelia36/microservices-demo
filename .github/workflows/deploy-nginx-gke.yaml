@@ -1,9 +1,6 @@
-cd /Users/drore/jen-git-onlineb/microservices-demo
-
-cat > .github/workflows/deploy-nginx-gke.yaml <<'YAML'
 name: Deploy Nginx (kustomize) to GKE
 
-"on":
+on:
   push:
     branches:
       - main
@@ -89,5 +86,3 @@ jobs:
           kubectl apply -k "dror/deploy/overlays/${ENV}"
           kubectl rollout status -n "${ENV}" deploy/nginx --timeout=600s
           kubectl get svc -n "${ENV}" nginx -o wide
-YAML
-
