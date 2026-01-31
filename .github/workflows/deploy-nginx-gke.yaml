@@ -5,11 +5,11 @@ on:
     branches:
       - main
     tags:
-      - 'v*'
+      - 'nginx-v*'
   workflow_dispatch:
     inputs:
       env:
-        description: Deploy environment (dev/staging/prod)
+        description: Deploy environment (dev / staging / prod)
         required: true
         type: choice
         options:
@@ -32,22 +32,26 @@ jobs:
           REF="${GITHUB_REF}"
           ENV=""
 
+          # Manual run
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENV="${{ inputs.env }}"
           fi
 
+          # main -> dev
           if [ -z "$ENV" ] && [ "$REF" = "refs/heads/main" ]; then
             ENV="dev"
           fi
 
+          # nginx tags -> staging / prod
           if [ -z "$ENV" ] && [[ "$REF" == refs/tags/* ]]; then
             TAG="${REF#refs/tags/}"
-            if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+
+            if [[ "$TAG" =~ ^nginx-v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
               ENV="staging"
-            elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            elif [[ "$TAG" =~ ^nginx-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               ENV="prod"
             else
-              echo "Unsupported tag: $TAG"
+              echo "Unsupported tag format: $TAG"
               exit 1
             fi
           fi
@@ -63,6 +67,7 @@ jobs:
     needs: decide
     runs-on: ubuntu-latest
     environment: ${{ needs.decide.outputs.env }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -86,3 +91,4 @@ jobs:
           kubectl apply -k "dror/deploy/overlays/${ENV}"
           kubectl rollout status -n "${ENV}" deploy/nginx --timeout=600s
           kubectl get svc -n "${ENV}" nginx -o wide
+
