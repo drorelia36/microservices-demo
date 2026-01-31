@@ -1,0 +1,90 @@
+cd /Users/drore/jen-git-onlineb/microservices-demo
+mkdir -p .github/workflows
+
+cat > .github/workflows/deploy-nginx-gke.yaml <<'YAML'
+name: Deploy Nginx (kustomize) to GKE
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Deploy environment (dev/staging/prod)"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.set.outputs.env }}
+    steps:
+      - id: set
+        run: |
+          REF="${GITHUB_REF}"
+          ENV=""
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ inputs.env }}"
+          fi
+
+          if [ -z "$ENV" ] && [ "$REF" = "refs/heads/main" ]; then
+            ENV="dev"
+          fi
+
+          if [ -z "$ENV" ] && [[ "$REF" == refs/tags/* ]]; then
+            TAG="${REF#refs/tags/}"
+            if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              ENV="staging"
+            elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              ENV="prod"
+            else
+              echo "Unsupported tag: $TAG"
+              exit 1
+            fi
+          fi
+
+          if [ -z "$ENV" ]; then
+            echo "No deploy target selected for ref=$REF"
+            exit 1
+          fi
+
+          echo "env=$ENV" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: decide
+    runs-on: ubuntu-latest
+    environment: ${{ needs.decide.outputs.env }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          cluster_name: ${{ secrets.GKE_CLUSTER_NAME }}
+          location: ${{ secrets.GKE_LOCATION }}
+
+      - name: Deploy overlay
+        run: |
+          set -euo pipefail
+          ENV="${{ needs.decide.outputs.env }}"
+          kubectl apply -k "dror/deploy/overlays/${ENV}"
+          kubectl rollout status -n "${ENV}" deploy/nginx --timeout=600s
+          kubectl get svc -n "${ENV}" nginx -o wide
+YAML
+
