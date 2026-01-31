@@ -1,20 +1,24 @@
 cd /Users/drore/jen-git-onlineb/microservices-demo
-mkdir -p .github/workflows
 
 cat > .github/workflows/deploy-nginx-gke.yaml <<'YAML'
 name: Deploy Nginx (kustomize) to GKE
 
 on:
   push:
-    branches: [ "main" ]
-    tags: [ "v*" ]
+    branches:
+      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       env:
-        description: "Deploy environment (dev/staging/prod)"
+        description: Deploy environment (dev/staging/prod)
         required: true
         type: choice
-        options: [dev, staging, prod]
+        options:
+          - dev
+          - staging
+          - prod
 
 permissions:
   contents: read
