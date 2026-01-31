@@ -3,7 +3,7 @@ cd /Users/drore/jen-git-onlineb/microservices-demo
 cat > .github/workflows/deploy-nginx-gke.yaml <<'YAML'
 name: Deploy Nginx (kustomize) to GKE
 
-on:
+"on":
   push:
     branches:
       - main
@@ -66,7 +66,6 @@ jobs:
     needs: decide
     runs-on: ubuntu-latest
     environment: ${{ needs.decide.outputs.env }}
-
     steps:
       - uses: actions/checkout@v4
 
