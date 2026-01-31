@@ -1,0 +1,11 @@
+namespace: dev
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Service
+      name: nginx
+    patch: |-
+      - op: replace
+        path: /spec/ports/0/port
+        value: 8081

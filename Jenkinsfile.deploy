@@ -1,0 +1,137 @@
+pipeline {
+  agent {
+    kubernetes {
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: kubectl
+    image: dtzar/helm-kubectl:3.14.4
+    command: ["cat"]
+    tty: true
+  - name: git
+    image: alpine/git:2.45.2
+    command: ["cat"]
+    tty: true
+"""
+    }
+  }
+
+  environment {
+    // שמור אצלך: namespaces שיצרת
+    DEV_NS   = "dev"
+    STAGE_NS = "staging"
+    PROD_NS  = "prod"
+
+    // הנתיב ל-kustomize overlays בתוך הריפו
+    KUSTOMIZE_ROOT = "dror/deploy/overlays"
+  }
+
+  stages {
+
+    stage("Checkout") {
+      steps {
+        container("git") {
+          checkout scm
+        }
+      }
+    }
+
+    stage("Decide target environment") {
+      steps {
+        script {
+          env.DEPLOY_ENV = ""
+          env.TARGET_NS  = ""
+
+          // branch build -> main => dev
+          if (env.BRANCH_NAME == "main") {
+            env.DEPLOY_ENV = "dev"
+            env.TARGET_NS  = env.DEV_NS
+          }
+
+          // tag build -> detect rc vs prod
+          if (env.TAG_NAME?.trim()) {
+            if (env.TAG_NAME ==~ /^v\\d+\\.\\d+\\.\\d+-rc\\.\\d+$/) {
+              env.DEPLOY_ENV = "staging"
+              env.TARGET_NS  = env.STAGE_NS
+            } else if (env.TAG_NAME ==~ /^v\\d+\\.\\d+\\.\\d+$/) {
+              env.DEPLOY_ENV = "prod"
+              env.TARGET_NS  = env.PROD_NS
+            } else {
+              error("Tag '${env.TAG_NAME}' does not match vX.Y.Z or vX.Y.Z-rc.N")
+            }
+          }
+
+          if (!env.TARGET_NS?.trim()) {
+            error("No deploy target selected (not main, not a supported tag). BRANCH_NAME='${env.BRANCH_NAME}', TAG_NAME='${env.TAG_NAME}'")
+          }
+
+          echo "✅ DEPLOY_ENV=${env.DEPLOY_ENV}"
+          echo "✅ TARGET_NS=${env.TARGET_NS}"
+        }
+      }
+    }
+
+    stage("Guardrails") {
+      steps {
+        script {
+          if (env.DEPLOY_ENV == "dev" && env.TARGET_NS != env.DEV_NS) {
+            error("DEV deploy must go only to ${env.DEV_NS}")
+          }
+          if (env.DEPLOY_ENV == "staging" && env.TARGET_NS != env.STAGE_NS) {
+            error("STAGING deploy must go only to ${env.STAGE_NS}")
+          }
+          if (env.DEPLOY_ENV == "prod" && env.TARGET_NS != env.PROD_NS) {
+            error("PROD deploy must go only to ${env.PROD_NS}")
+          }
+        }
+      }
+    }
+
+    stage("Approval (PROD only)") {
+      when {
+        expression { return env.DEPLOY_ENV == "prod" }
+      }
+      steps {
+        input message: "Deploy tag ${env.TAG_NAME} to PROD namespace ${env.PROD_NS} ?", ok: "Deploy"
+      }
+    }
+
+    stage("Deploy (kustomize)") {
+      steps {
+        container("kubectl") {
+          sh '''
+            set -euo pipefail
+            echo "🚀 Applying kustomize overlay: ${KUSTOMIZE_ROOT}/${DEPLOY_ENV}"
+            kubectl apply -k "${KUSTOMIZE_ROOT}/${DEPLOY_ENV}"
+          '''
+        }
+      }
+    }
+
+    stage("Rollout nginx") {
+      steps {
+        container("kubectl") {
+          sh '''
+            set -euo pipefail
+            kubectl rollout status -n "${TARGET_NS}" deploy/nginx --timeout=600s
+          '''
+        }
+      }
+    }
+
+    stage("Show service endpoint") {
+      steps {
+        container("kubectl") {
+          sh '''
+            set -euo pipefail
+            kubectl get svc -n "${TARGET_NS}" nginx -o wide
+          '''
+        }
+      }
+    }
+  }
+}
+
