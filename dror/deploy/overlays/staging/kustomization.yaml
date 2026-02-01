@@ -14,3 +14,9 @@ configMapGenerator:
 generatorOptions:
   disableNameSuffixHash: false
 
+patches:
+  - path: service-ports-jsonpatch.yaml
+    target:
+      version: v1
+      kind: Service
+      name: nginx
