@@ -1,11 +1,16 @@
-namespace: staging
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
 resources:
   - ../../base
-patches:
-  - target:
-      kind: Service
-      name: nginx
-    patch: |-
-      - op: replace
-        path: /spec/ports/0/port
-        value: 8082
+
+namespace: staging
+
+configMapGenerator:
+  - name: nginx-html
+    files:
+      - index.html
+
+generatorOptions:
+  disableNameSuffixHash: false
+
